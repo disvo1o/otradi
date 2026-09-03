@@ -29,6 +29,7 @@ TOTAL_PARTICIPANTS = SQUAD_LIMIT * TOTAL_SQUADS
 PARTICIPANTS_SHEET = "Участники"
 STATS_SHEET = "Статистика"
 
+
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
 
@@ -47,46 +48,16 @@ if not GOOGLE_SERVICE_ACCOUNT_JSON:
 # ============================================================
 
 SQUADS = [
-    {
-        "name": "Squad 1",
-        "link": os.getenv("SQUAD_1_LINK", ""),
-    },
-    {
-        "name": "Squad 2",
-        "link": os.getenv("SQUAD_2_LINK", ""),
-    },
-    {
-        "name": "Squad 3",
-        "link": os.getenv("SQUAD_3_LINK", ""),
-    },
-    {
-        "name": "Squad 4",
-        "link": os.getenv("SQUAD_4_LINK", ""),
-    },
-    {
-        "name": "Squad 5",
-        "link": os.getenv("SQUAD_5_LINK", ""),
-    },
-    {
-        "name": "Squad 6",
-        "link": os.getenv("SQUAD_6_LINK", ""),
-    },
-    {
-        "name": "Squad 7",
-        "link": os.getenv("SQUAD_7_LINK", ""),
-    },
-    {
-        "name": "Squad 8",
-        "link": os.getenv("SQUAD_8_LINK", ""),
-    },
-    {
-        "name": "Squad 9",
-        "link": os.getenv("SQUAD_9_LINK", ""),
-    },
-    {
-        "name": "Squad 10",
-        "link": os.getenv("SQUAD_10_LINK", ""),
-    },
+    {"name": "Squad 1", "link": os.getenv("SQUAD_1_LINK", "")},
+    {"name": "Squad 2", "link": os.getenv("SQUAD_2_LINK", "")},
+    {"name": "Squad 3", "link": os.getenv("SQUAD_3_LINK", "")},
+    {"name": "Squad 4", "link": os.getenv("SQUAD_4_LINK", "")},
+    {"name": "Squad 5", "link": os.getenv("SQUAD_5_LINK", "")},
+    {"name": "Squad 6", "link": os.getenv("SQUAD_6_LINK", "")},
+    {"name": "Squad 7", "link": os.getenv("SQUAD_7_LINK", "")},
+    {"name": "Squad 8", "link": os.getenv("SQUAD_8_LINK", "")},
+    {"name": "Squad 9", "link": os.getenv("SQUAD_9_LINK", "")},
+    {"name": "Squad 10", "link": os.getenv("SQUAD_10_LINK", "")},
 ]
 
 
@@ -140,6 +111,9 @@ def get_spreadsheet():
 def ensure_sheet_exists(sheet_name):
     """
     Creates a Google Sheets tab if it doesn't exist.
+
+    If the tab was created by another simultaneous request,
+    the "already exists" error is safely ignored.
     """
 
     service = get_google_service()
@@ -168,10 +142,21 @@ def ensure_sheet_exists(sheet_name):
         ]
     }
 
-    service.spreadsheets().batchUpdate(
-        spreadsheetId=GOOGLE_SHEET_ID,
-        body=body,
-    ).execute()
+    try:
+
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=GOOGLE_SHEET_ID,
+            body=body,
+        ).execute()
+
+    except Exception as error:
+
+        error_text = str(error)
+
+        if "already exists" in error_text:
+            return
+
+        raise
 
 
 def setup_google_sheets():
@@ -179,12 +164,20 @@ def setup_google_sheets():
     Creates required tabs and headers.
     """
 
-    ensure_sheet_exists(PARTICIPANTS_SHEET)
-    ensure_sheet_exists(STATS_SHEET)
+    ensure_sheet_exists(
+        PARTICIPANTS_SHEET
+    )
+
+    ensure_sheet_exists(
+        STATS_SHEET
+    )
 
     service = get_google_service()
 
+    # --------------------------------------------------------
     # Participants headers
+    # --------------------------------------------------------
+
     service.spreadsheets().values().update(
         spreadsheetId=GOOGLE_SHEET_ID,
         range=f"{PARTICIPANTS_SHEET}!A1:E1",
@@ -202,7 +195,10 @@ def setup_google_sheets():
         },
     ).execute()
 
+    # --------------------------------------------------------
     # Statistics headers
+    # --------------------------------------------------------
+
     service.spreadsheets().values().update(
         spreadsheetId=GOOGLE_SHEET_ID,
         range=f"{STATS_SHEET}!A1:C1",
@@ -233,14 +229,18 @@ def read_participants():
         range=f"{PARTICIPANTS_SHEET}!A2:E",
     ).execute()
 
-    values = result.get("values", [])
+    values = result.get(
+        "values",
+        []
+    )
 
     participants = []
 
     for row in values:
 
-        # Make sure row has 5 columns.
-        row = row + [""] * (5 - len(row))
+        row = row + [""] * (
+            5 - len(row)
+        )
 
         participants.append({
             "squad": row[0],
@@ -355,10 +355,6 @@ def write_statistics(participants):
 
 
 def sync_statistics(participants):
-    """
-    Updates statistics without changing participants.
-    """
-
     write_statistics(participants)
 
 
@@ -367,19 +363,26 @@ def sync_statistics(participants):
 # ============================================================
 
 async def async_read_participants():
+
     return await asyncio.to_thread(
         read_participants
     )
 
 
-async def async_write_participants(participants):
+async def async_write_participants(
+    participants
+):
+
     await asyncio.to_thread(
         write_participants,
         participants,
     )
 
 
-async def async_write_statistics(participants):
+async def async_write_statistics(
+    participants
+):
+
     await asyncio.to_thread(
         write_statistics,
         participants,
@@ -387,6 +390,7 @@ async def async_write_statistics(participants):
 
 
 async def async_setup_sheets():
+
     await asyncio.to_thread(
         setup_google_sheets
     )
@@ -396,10 +400,6 @@ async def async_setup_sheets():
 # ASSIGNMENT LOCK
 # ============================================================
 
-# Railway runs one bot process.
-# This lock prevents two simultaneous button presses
-# from modifying Google Sheets at the same time.
-
 assignment_lock = asyncio.Lock()
 
 
@@ -407,12 +407,21 @@ assignment_lock = asyncio.Lock()
 # FIND USER
 # ============================================================
 
-def find_user(participants, telegram_id):
-    telegram_id = str(telegram_id)
+def find_user(
+    participants,
+    telegram_id
+):
+
+    telegram_id = str(
+        telegram_id
+    )
 
     for participant in participants:
 
-        if str(participant["telegram_id"]) == telegram_id:
+        if str(
+            participant["telegram_id"]
+        ) == telegram_id:
+
             return participant
 
     return None
@@ -431,10 +440,12 @@ async def assign_squad(
 
     async with assignment_lock:
 
-        participants = await async_read_participants()
+        participants = (
+            await async_read_participants()
+        )
 
         # ----------------------------------------------------
-        # User already has a squad.
+        # Check if user already has a squad
         # ----------------------------------------------------
 
         existing = find_user(
@@ -447,13 +458,13 @@ async def assign_squad(
             for squad in SQUADS:
 
                 if squad["name"] == existing["squad"]:
+
                     return squad, False
 
             return None, False
 
-
         # ----------------------------------------------------
-        # Count participants in each squad.
+        # Count participants in each squad
         # ----------------------------------------------------
 
         counts = {
@@ -468,37 +479,41 @@ async def assign_squad(
             if squad_name in counts:
                 counts[squad_name] += 1
 
-
         # ----------------------------------------------------
-        # Check total capacity.
+        # Check total capacity
         # ----------------------------------------------------
 
         if len(participants) >= TOTAL_PARTICIPANTS:
+
             return None, False
 
-
         # ----------------------------------------------------
-        # Build free slots.
+        # Weighted random selection
         #
-        # If:
+        # Every free place is one ticket.
         #
-        # Squad 1 = 5 free places
-        # Squad 2 = 10 free places
+        # Example:
         #
-        # Squad 1 appears 5 times.
-        # Squad 2 appears 10 times.
+        # Squad 1 has 20 free places
+        # Squad 2 has 10 free places
         #
-        # This keeps the selection random while guaranteeing
-        # that no squad exceeds 20 people.
+        # Squad 1 gets twice the probability.
+        #
+        # This keeps assignment random while guaranteeing
+        # that no squad can exceed 20 participants.
         # ----------------------------------------------------
 
         free_slots = []
 
         for squad in SQUADS:
 
-            count = counts[squad["name"]]
+            count = counts[
+                squad["name"]
+            ]
 
-            free_places = SQUAD_LIMIT - count
+            free_places = (
+                SQUAD_LIMIT - count
+            )
 
             for _ in range(free_places):
 
@@ -506,31 +521,29 @@ async def assign_squad(
                     squad["name"]
                 )
 
-
         if not free_slots:
-            return None, False
 
+            return None, False
 
         selected_name = random.choice(
             free_slots
         )
-
 
         selected_squad = None
 
         for squad in SQUADS:
 
             if squad["name"] == selected_name:
+
                 selected_squad = squad
                 break
 
-
         if selected_squad is None:
+
             return None, False
 
-
         # ----------------------------------------------------
-        # Add participant.
+        # Save participant
         # ----------------------------------------------------
 
         participant = {
@@ -542,28 +555,22 @@ async def assign_squad(
                 if username
                 else ""
             ),
-            "telegram_id": str(telegram_id),
+            "telegram_id": str(
+                telegram_id
+            ),
         }
 
-        participants.append(participant)
-
-
-        # ----------------------------------------------------
-        # Save participants.
-        # ----------------------------------------------------
+        participants.append(
+            participant
+        )
 
         await async_write_participants(
             participants
         )
 
-        # ----------------------------------------------------
-        # Update statistics.
-        # ----------------------------------------------------
-
         await async_write_statistics(
             participants
         )
-
 
         return selected_squad, True
 
@@ -598,7 +605,8 @@ async def send_team(
     if squad["link"]:
 
         text = (
-            f"🎉 <b>Твоя команда — {squad['name']}!</b>\n\n"
+            f"🎉 <b>Твоя команда — "
+            f"{squad['name']}!</b>\n\n"
             f"Переходи в свою команду:\n"
             f"{squad['link']}"
         )
@@ -606,8 +614,10 @@ async def send_team(
     else:
 
         text = (
-            f"🎉 <b>Твоя команда — {squad['name']}!</b>\n\n"
-            "⚠️ Ссылка на эту команду пока не настроена."
+            f"🎉 <b>Твоя команда — "
+            f"{squad['name']}!</b>\n\n"
+            "⚠️ Ссылка на эту команду "
+            "пока не настроена."
         )
 
     await message.answer(
@@ -622,7 +632,9 @@ async def send_team(
 # ============================================================
 
 @dp.message(Command("start"))
-async def start_handler(message: Message):
+async def start_handler(
+    message: Message
+):
 
     await message.answer(
         "Привет! 👋\n\n"
@@ -636,7 +648,9 @@ async def start_handler(message: Message):
 # GET SQUAD BUTTON
 # ============================================================
 
-@dp.callback_query(F.data == "get_squad")
+@dp.callback_query(
+    F.data == "get_squad"
+)
 async def get_squad_callback(
     callback: CallbackQuery,
 ):
@@ -645,11 +659,13 @@ async def get_squad_callback(
 
     try:
 
-        squad, newly_assigned = await assign_squad(
-            telegram_id=user.id,
-            first_name=user.first_name or "",
-            last_name=user.last_name or "",
-            username=user.username or "",
+        squad, newly_assigned = (
+            await assign_squad(
+                telegram_id=user.id,
+                first_name=user.first_name or "",
+                last_name=user.last_name or "",
+                username=user.username or "",
+            )
         )
 
     except Exception as error:
@@ -665,8 +681,8 @@ async def get_squad_callback(
         )
 
         await callback.answer()
-        return
 
+        return
 
     if squad is None:
 
@@ -676,8 +692,8 @@ async def get_squad_callback(
         )
 
         await callback.answer()
-        return
 
+        return
 
     await send_team(
         callback.message,
@@ -692,13 +708,17 @@ async def get_squad_callback(
 # ============================================================
 
 @dp.message(Command("team"))
-async def team_handler(message: Message):
+async def team_handler(
+    message: Message
+):
 
     user = message.from_user
 
     try:
 
-        participants = await async_read_participants()
+        participants = (
+            await async_read_participants()
+        )
 
     except Exception as error:
 
@@ -714,12 +734,10 @@ async def team_handler(message: Message):
 
         return
 
-
     participant = find_user(
         participants,
         user.id,
     )
-
 
     if not participant:
 
@@ -731,15 +749,14 @@ async def team_handler(message: Message):
 
         return
 
-
     squad = None
 
     for item in SQUADS:
 
         if item["name"] == participant["squad"]:
+
             squad = item
             break
-
 
     if squad is None:
 
@@ -748,7 +765,6 @@ async def team_handler(message: Message):
         )
 
         return
-
 
     await send_team(
         message,
@@ -760,9 +776,13 @@ async def team_handler(message: Message):
 # ADMIN CHECK
 # ============================================================
 
-def is_admin(message: Message):
+def is_admin(
+    message: Message
+):
 
-    return str(message.from_user.id) == str(
+    return str(
+        message.from_user.id
+    ) == str(
         ADMIN_TELEGRAM_ID
     )
 
@@ -772,7 +792,9 @@ def is_admin(message: Message):
 # ============================================================
 
 @dp.message(Command("admin"))
-async def admin_handler(message: Message):
+async def admin_handler(
+    message: Message
+):
 
     if not is_admin(message):
 
@@ -782,10 +804,11 @@ async def admin_handler(message: Message):
 
         return
 
-
     try:
 
-        participants = await async_read_participants()
+        participants = (
+            await async_read_participants()
+        )
 
     except Exception as error:
 
@@ -795,11 +818,11 @@ async def admin_handler(message: Message):
         )
 
         await message.answer(
-            "❌ Не удалось прочитать Google Таблицу."
+            "❌ Не удалось прочитать "
+            "Google Таблицу."
         )
 
         return
-
 
     counts = {
         squad["name"]: 0
@@ -809,14 +832,15 @@ async def admin_handler(message: Message):
     for participant in participants:
 
         if participant["squad"] in counts:
-            counts[participant["squad"]] += 1
 
+            counts[
+                participant["squad"]
+            ] += 1
 
     lines = [
         "📊 <b>Статистика команд</b>",
         "",
     ]
-
 
     for squad in SQUADS:
 
@@ -830,12 +854,12 @@ async def admin_handler(message: Message):
             f"(свободно: {free})"
         )
 
-
     lines.extend([
         "",
-        f"👥 Всего: {len(participants)}/{TOTAL_PARTICIPANTS}",
+        f"👥 Всего: "
+        f"{len(participants)}/"
+        f"{TOTAL_PARTICIPANTS}",
     ])
-
 
     await message.answer(
         "\n".join(lines),
@@ -848,7 +872,9 @@ async def admin_handler(message: Message):
 # ============================================================
 
 @dp.message(Command("sync"))
-async def sync_handler(message: Message):
+async def sync_handler(
+    message: Message
+):
 
     if not is_admin(message):
 
@@ -858,17 +884,19 @@ async def sync_handler(message: Message):
 
         return
 
-
     try:
 
-        participants = await async_read_participants()
+        participants = (
+            await async_read_participants()
+        )
 
         await async_write_statistics(
             participants
         )
 
         await message.answer(
-            "✅ Статистика Google Таблицы обновлена."
+            "✅ Статистика Google Таблицы "
+            "обновлена."
         )
 
     except Exception as error:
@@ -879,7 +907,8 @@ async def sync_handler(message: Message):
         )
 
         await message.answer(
-            "❌ Ошибка синхронизации Google Таблицы."
+            "❌ Ошибка синхронизации "
+            "Google Таблицы."
         )
 
 
@@ -888,7 +917,9 @@ async def sync_handler(message: Message):
 # ============================================================
 
 @dp.message(Command("reset"))
-async def reset_handler(message: Message):
+async def reset_handler(
+    message: Message
+):
 
     if not is_admin(message):
 
@@ -897,7 +928,6 @@ async def reset_handler(message: Message):
         )
 
         return
-
 
     async with assignment_lock:
 
@@ -926,7 +956,6 @@ async def reset_handler(message: Message):
 
             return
 
-
     await message.answer(
         "♻️ Распределение полностью сброшено.\n\n"
         "Все 10 команд снова пустые.\n"
@@ -939,7 +968,9 @@ async def reset_handler(message: Message):
 # ============================================================
 
 @dp.message(Command("help"))
-async def help_handler(message: Message):
+async def help_handler(
+    message: Message
+):
 
     text = (
         "ℹ️ <b>Команды</b>\n\n"
@@ -968,7 +999,9 @@ async def help_handler(message: Message):
 # ============================================================
 
 @dp.message()
-async def fallback_handler(message: Message):
+async def fallback_handler(
+    message: Message
+):
 
     await message.answer(
         "Нажми кнопку ниже, чтобы получить "
@@ -985,10 +1018,6 @@ async def main():
 
     print("Starting bot...")
 
-    # --------------------------------------------------------
-    # Prepare Google Sheets.
-    # --------------------------------------------------------
-
     try:
 
         await async_setup_sheets()
@@ -1004,15 +1033,15 @@ async def main():
 
         raise
 
-
     print("Bot started.")
 
     await dp.start_polling(bot)
 
 
 # ============================================================
-# START
+# START APPLICATION
 # ============================================================
 
 if __name__ == "__main__":
+
     asyncio.run(main())
