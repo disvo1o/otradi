@@ -48,16 +48,16 @@ if not GOOGLE_SERVICE_ACCOUNT_JSON:
 # ============================================================
 
 SQUADS = [
-    {"name": "Squad 1", "link": os.getenv("SQUAD_1_LINK", "")},
-    {"name": "Squad 2", "link": os.getenv("SQUAD_2_LINK", "")},
-    {"name": "Squad 3", "link": os.getenv("SQUAD_3_LINK", "")},
-    {"name": "Squad 4", "link": os.getenv("SQUAD_4_LINK", "")},
-    {"name": "Squad 5", "link": os.getenv("SQUAD_5_LINK", "")},
-    {"name": "Squad 6", "link": os.getenv("SQUAD_6_LINK", "")},
-    {"name": "Squad 7", "link": os.getenv("SQUAD_7_LINK", "")},
-    {"name": "Squad 8", "link": os.getenv("SQUAD_8_LINK", "")},
-    {"name": "Squad 9", "link": os.getenv("SQUAD_9_LINK", "")},
-    {"name": "Squad 10", "link": os.getenv("SQUAD_10_LINK", "")},
+    {"name": "отряд 1", "link": os.getenv("SQUAD_1_LINK", "")},
+    {"name": "отряд 2", "link": os.getenv("SQUAD_2_LINK", "")},
+    {"name": "отряд 3", "link": os.getenv("SQUAD_3_LINK", "")},
+    {"name": "отряд 4", "link": os.getenv("SQUAD_4_LINK", "")},
+    {"name": "отряд 5", "link": os.getenv("SQUAD_5_LINK", "")},
+    {"name": "отряд 6", "link": os.getenv("SQUAD_6_LINK", "")},
+    {"name": "отряд 7", "link": os.getenv("SQUAD_7_LINK", "")},
+    {"name": "отряд 8", "link": os.getenv("SQUAD_8_LINK", "")},
+    {"name": "отряд 9", "link": os.getenv("SQUAD_9_LINK", "")},
+    {"name": "отряд 10", "link": os.getenv("SQUAD_10_LINK", "")},
 ]
 
 
@@ -585,7 +585,7 @@ def main_keyboard():
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🎲 Получить свою команду",
+                    text="🎲 получить свою команду",
                     callback_data="get_squad",
                 )
             ]
@@ -605,18 +605,18 @@ async def send_team(
     if squad["link"]:
 
         text = (
-            f"🎉 <b>Твоя команда — "
+            f"🎉 <b>твоя команда — "
             f"{squad['name']}!</b>\n\n"
-            f"Переходи в свою команду:\n"
+            f"переходи в свою команду:\n"
             f"{squad['link']}"
         )
 
     else:
 
         text = (
-            f"🎉 <b>Твоя команда — "
+            f"🎉 <b>твоя команда — "
             f"{squad['name']}!</b>\n\n"
-            "⚠️ Ссылка на эту команду "
+            "⚠️ ссылка на эту команду "
             "пока не настроена."
         )
 
@@ -637,8 +637,8 @@ async def start_handler(
 ):
 
     await message.answer(
-        "Привет! 👋\n\n"
-        "Нажми кнопку ниже, чтобы получить "
+        "привет! 👋\n\n"
+        "нажми кнопку ниже, чтобы получить "
         "свою случайную команду.",
         reply_markup=main_keyboard(),
     )
@@ -676,8 +676,8 @@ async def get_squad_callback(
         )
 
         await callback.message.answer(
-            "❌ Произошла ошибка. "
-            "Попробуй ещё раз через несколько секунд."
+            "❌ произошла ошибка. "
+            "попробуй ещё раз через несколько секунд."
         )
 
         await callback.answer()
@@ -687,7 +687,7 @@ async def get_squad_callback(
     if squad is None:
 
         await callback.message.answer(
-            "❌ Все команды уже заполнены.\n\n"
+            "❌ все команды уже заполнены.\n\n"
             "Всего мест: 200."
         )
 
