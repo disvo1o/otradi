@@ -1,25 +1,37 @@
 import os
 import asyncio
 import random
+import json
+from io import StringIO
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
 from sqlalchemy import select, delete
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import (
+    create_async_engine,
+    async_sessionmaker,
+)
+
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 
 from database import Base, Squad, Participant
 
 
 # ============================================================
-# НАСТРОЙКИ
+# ENVIRONMENT VARIABLES
 # ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_TELEGRAM_ID = os.getenv("ADMIN_TELEGRAM_ID")
 
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
@@ -27,19 +39,36 @@ if not BOT_TOKEN:
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set")
 
+if not ADMIN_TELEGRAM_ID:
+    raise RuntimeError("ADMIN_TELEGRAM_ID is not set")
 
-# Railway PostgreSQL обычно дает:
-# postgresql://...
-#
-# Для SQLAlchemy Async нам нужен:
-# postgresql+asyncpg://...
-#
-# Поэтому автоматически исправляем адрес.
-if DATABASE_URL.startswith("postgresql://"):
+if not GOOGLE_SERVICE_ACCOUNT_JSON:
+    raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not set")
+
+if not GOOGLE_SHEET_ID:
+    raise RuntimeError("GOOGLE_SHEET_ID is not set")
+
+
+# ============================================================
+# DATABASE URL
+# ============================================================
+
+DATABASE_URL = DATABASE_URL.strip()
+
+# Railway/PostgreSQL may provide postgres://
+# SQLAlchemy async engine needs asyncpg.
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace(
+        "postgres://",
+        "postgresql+asyncpg://",
+        1,
+    )
+
+elif DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace(
         "postgresql://",
         "postgresql+asyncpg://",
-        1
+        1,
     )
 
 
@@ -50,6 +79,7 @@ if DATABASE_URL.startswith("postgresql://"):
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
+    pool_pre_ping=True,
 )
 
 SessionLocal = async_sessionmaker(
@@ -61,6 +91,8 @@ SessionLocal = async_sessionmaker(
 # ============================================================
 # SQUADS
 # ============================================================
+
+SQUAD_LIMIT = 20
 
 SQUADS = [
     {
@@ -107,7 +139,7 @@ SQUADS = [
 
 
 # ============================================================
-# BOT
+# TELEGRAM
 # ============================================================
 
 bot = Bot(token=BOT_TOKEN)
@@ -115,53 +147,247 @@ dp = Dispatcher()
 
 
 # ============================================================
+# GOOGLE SHEETS
+# ============================================================
+
+GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets"
+]
+
+
+def get_google_sheets_service():
+    """
+    Creates Google Sheets API client from
+    GOOGLE_SERVICE_ACCOUNT_JSON.
+    """
+
+    credentials_data = json.loads(
+        GOOGLE_SERVICE_ACCOUNT_JSON
+    )
+
+    credentials = Credentials.from_service_account_info(
+        credentials_data,
+        scopes=GOOGLE_SCOPES,
+    )
+
+    service = build(
+        "sheets",
+        "v4",
+        credentials=credentials,
+        cache_discovery=False,
+    )
+
+    return service
+
+
+def update_google_sheet(rows):
+    """
+    Completely rebuilds the Participants sheet
+    from PostgreSQL data.
+
+    This makes Google Sheets a mirror of the database.
+    """
+
+    service = get_google_sheets_service()
+
+    values = [
+        [
+            "Команда",
+            "Имя",
+            "Фамилия",
+            "Username",
+            "Telegram ID",
+        ]
+    ]
+
+    for row in rows:
+        values.append([
+            row["squad"],
+            row["first_name"],
+            row["last_name"],
+            row["username"],
+            row["telegram_id"],
+        ])
+
+    body = {
+        "values": values
+    }
+
+    # Clear existing data
+    service.spreadsheets().values().clear(
+        spreadsheetId=GOOGLE_SHEET_ID,
+        range="Участники!A:E",
+        body={},
+    ).execute()
+
+    # Write fresh data
+    service.spreadsheets().values().update(
+        spreadsheetId=GOOGLE_SHEET_ID,
+        range="Участники!A1",
+        valueInputOption="USER_ENTERED",
+        body=body,
+    ).execute()
+
+
+def update_google_stats(stats):
+    """
+    Updates the Statistics sheet.
+    """
+
+    service = get_google_sheets_service()
+
+    values = [
+        [
+            "Команда",
+            "Участников",
+            "Свободных мест",
+        ]
+    ]
+
+    for stat in stats:
+        values.append([
+            stat["name"],
+            stat["count"],
+            stat["free"],
+        ])
+
+    body = {
+        "values": values
+    }
+
+    service.spreadsheets().values().clear(
+        spreadsheetId=GOOGLE_SHEET_ID,
+        range="Статистика!A:C",
+        body={},
+    ).execute()
+
+    service.spreadsheets().values().update(
+        spreadsheetId=GOOGLE_SHEET_ID,
+        range="Статистика!A1",
+        valueInputOption="USER_ENTERED",
+        body=body,
+    ).execute()
+
+
+async def sync_google_sheets():
+    """
+    Loads current PostgreSQL state and synchronizes
+    both Google Sheets tabs.
+    """
+
+    async with SessionLocal() as session:
+
+        squads_result = await session.execute(
+            select(Squad).order_by(Squad.id)
+        )
+
+        squads = squads_result.scalars().all()
+
+        participants_result = await session.execute(
+            select(Participant, Squad)
+            .join(Squad, Participant.squad_id == Squad.id)
+            .order_by(Squad.id, Participant.id)
+        )
+
+        participant_rows = participants_result.all()
+
+    rows = []
+
+    for participant, squad in participant_rows:
+
+        rows.append({
+            "squad": squad.name,
+            "first_name": participant.first_name or "",
+            "last_name": participant.last_name or "",
+            "username": (
+                f"@{participant.username}"
+                if participant.username
+                else ""
+            ),
+            "telegram_id": str(participant.telegram_id),
+        })
+
+    stats = []
+
+    for squad in squads:
+        count = squad.members_count or 0
+
+        stats.append({
+            "name": squad.name,
+            "count": count,
+            "free": SQUAD_LIMIT - count,
+        })
+
+    # Google API is synchronous, therefore run it
+    # outside the async event loop.
+    await asyncio.to_thread(
+        update_google_sheet,
+        rows,
+    )
+
+    await asyncio.to_thread(
+        update_google_stats,
+        stats,
+    )
+
+
+# ============================================================
 # DATABASE INITIALIZATION
 # ============================================================
 
 async def init_database():
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
     async with SessionLocal() as session:
+
         result = await session.execute(
             select(Squad).order_by(Squad.id)
         )
 
         squads = result.scalars().all()
 
-        # Если squads еще нет — создаем 10 штук
         if not squads:
+
             for squad_data in SQUADS:
+
                 squad = Squad(
                     name=squad_data["name"],
                     link=squad_data["link"],
                     members_count=0,
                 )
+
                 session.add(squad)
 
             await session.commit()
 
         else:
-            # Обновляем названия и ссылки,
-            # но НЕ трогаем количество участников.
-            for index, squad in enumerate(squads[:10]):
-                squad.name = SQUADS[index]["name"]
-                squad.link = SQUADS[index]["link"]
+
+            # Update squad names/links without resetting counts.
+
+            for index, squad_data in enumerate(SQUADS):
+
+                if index < len(squads):
+
+                    squads[index].name = squad_data["name"]
+                    squads[index].link = squad_data["link"]
 
             await session.commit()
 
 
 # ============================================================
-# КНОПКА
+# KEYBOARD
 # ============================================================
 
-def get_squad_keyboard():
+def main_keyboard():
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="🎲 Получить свою команду",
-                    callback_data="get_squad"
+                    callback_data="get_squad",
                 )
             ]
         ]
@@ -169,38 +395,25 @@ def get_squad_keyboard():
 
 
 # ============================================================
-# START
-# ============================================================
-
-@dp.message(Command("start"))
-async def start_handler(message: Message):
-    await message.answer(
-        "Привет! 👋\n\n"
-        "Нажми кнопку ниже, чтобы получить свою команду.\n\n"
-        "⚠️ После назначения изменить команду будет нельзя.",
-        reply_markup=get_squad_keyboard(),
-    )
-
-
-# ============================================================
 # ASSIGN SQUAD
 # ============================================================
 
-async def assign_squad(message: Message):
-    telegram_id = message.from_user.id
-
-    first_name = message.from_user.first_name or ""
-    last_name = message.from_user.last_name or ""
-    username = message.from_user.username or ""
+async def assign_squad(
+    telegram_id: int,
+    first_name: str,
+    last_name: str,
+    username: str,
+):
 
     async with SessionLocal() as session:
 
         # ----------------------------------------------------
-        # Проверяем, есть ли пользователь уже в базе
+        # Check whether user already has a squad.
         # ----------------------------------------------------
 
         existing_result = await session.execute(
-            select(Participant).where(
+            select(Participant)
+            .where(
                 Participant.telegram_id == telegram_id
             )
         )
@@ -208,88 +421,71 @@ async def assign_squad(message: Message):
         existing = existing_result.scalar_one_or_none()
 
         if existing:
+
             squad_result = await session.execute(
-                select(Squad).where(
-                    Squad.id == existing.squad_id
-                )
+                select(Squad)
+                .where(Squad.id == existing.squad_id)
             )
 
-            squad = squad_result.scalar_one_or_none()
+            squad = squad_result.scalar_one()
 
-            if squad:
-                text = (
-                    f"✅ Ты уже получил команду:\n\n"
-                    f"🏆 <b>{squad.name}</b>\n\n"
-                )
+            return squad, False
 
-                if squad.link:
-                    text += f"🔗 <a href=\"{squad.link}\">Войти в команду</a>\n\n"
-
-                text += "Повторное нажатие не изменит твою команду."
-
-                await message.answer(
-                    text,
-                    parse_mode="HTML",
-                )
-                return
 
         # ----------------------------------------------------
-        # Блокируем squads на время выбора
-        #
-        # Это защищает от ситуации, когда два человека
-        # одновременно получают одно и то же последнее место.
+        # Lock squads so simultaneous requests don't
+        # overfill a squad.
         # ----------------------------------------------------
 
-        result = await session.execute(
+        squads_result = await session.execute(
             select(Squad)
             .order_by(Squad.id)
             .with_for_update()
         )
 
-        squads = result.scalars().all()
+        squads = squads_result.scalars().all()
+
 
         # ----------------------------------------------------
-        # Создаем список свободных "слотов".
+        # Create a list of free slots.
         #
-        # Например:
+        # Example:
         #
-        # Squad 1: 5 мест
-        # Squad 2: 10 мест
+        # Squad 1 has 3 free places
+        # Squad 2 has 10 free places
         #
-        # Тогда Squad 2 будет встречаться в списке
-        # в 2 раза чаще.
+        # Squad 1 appears 3 times.
+        # Squad 2 appears 10 times.
         #
-        # Таким образом выбор полностью случайный,
-        # но команда никогда не превысит 20 человек.
+        # Therefore the selection is random, but every
+        # squad can never exceed 20 people.
         # ----------------------------------------------------
 
         free_slots = []
 
         for squad in squads:
-            free_places = 20 - squad.members_count
+
+            free_places = (
+                SQUAD_LIMIT - squad.members_count
+            )
 
             if free_places > 0:
+
                 for _ in range(free_places):
                     free_slots.append(squad)
 
-        # ----------------------------------------------------
-        # Все места закончились
-        # ----------------------------------------------------
 
         if not free_slots:
-            await message.answer(
-                "❌ Все команды уже заполнены."
-            )
-            return
+            return None, False
+
+
+        selected_squad = random.choice(
+            free_slots
+        )
+
 
         # ----------------------------------------------------
-        # Случайно выбираем свободное место
-        # ----------------------------------------------------
-
-        selected_squad = random.choice(free_slots)
-
-        # ----------------------------------------------------
-        # Создаем участника
+        # Create participant.
         # ----------------------------------------------------
 
         participant = Participant(
@@ -305,98 +501,186 @@ async def assign_squad(message: Message):
         selected_squad.members_count += 1
 
         try:
+
             await session.commit()
 
         except IntegrityError:
-            # На случай редкой гонки запросов:
-            # если пользователь уже был записан,
-            # просто откатываем текущую транзакцию.
+
+            # Another request assigned this user first.
             await session.rollback()
 
             existing_result = await session.execute(
-                select(Participant).where(
+                select(Participant)
+                .where(
                     Participant.telegram_id == telegram_id
                 )
             )
 
-            existing = existing_result.scalar_one_or_none()
+            existing = existing_result.scalar_one()
 
-            if existing:
-                squad_result = await session.execute(
-                    select(Squad).where(
-                        Squad.id == existing.squad_id
-                    )
+            squad_result = await session.execute(
+                select(Squad)
+                .where(
+                    Squad.id == existing.squad_id
                 )
-
-                squad = squad_result.scalar_one_or_none()
-
-                if squad:
-                    text = (
-                        f"✅ Ты уже получил команду:\n\n"
-                        f"🏆 <b>{squad.name}</b>\n\n"
-                    )
-
-                    if squad.link:
-                        text += (
-                            f"🔗 <a href=\"{squad.link}\">"
-                            f"Войти в команду"
-                            f"</a>\n\n"
-                        )
-
-                    text += "Повторное нажатие не изменит твою команду."
-
-                    await message.answer(
-                        text,
-                        parse_mode="HTML",
-                    )
-
-            return
-
-        # ----------------------------------------------------
-        # Отправляем результат
-        # ----------------------------------------------------
-
-        text = (
-            f"🎉 Твоя команда:\n\n"
-            f"🏆 <b>{selected_squad.name}</b>\n\n"
-        )
-
-        if selected_squad.link:
-            text += (
-                f"🔗 <a href=\"{selected_squad.link}\">"
-                f"Перейти в команду"
-                f"</a>\n\n"
             )
 
-        text += (
-            "Твоя команда закреплена за тобой.\n"
-            "Повторное нажатие не изменит её."
-        )
+            selected_squad = squad_result.scalar_one()
 
-        await message.answer(
-            text,
-            parse_mode="HTML",
-        )
+            return selected_squad, False
+
+
+        return selected_squad, True
 
 
 # ============================================================
-# КНОПКА "ПОЛУЧИТЬ КОМАНДУ"
+# SEND TEAM
+# ============================================================
+
+async def send_team(
+    message: Message,
+    squad: Squad,
+):
+
+    if squad.link:
+
+        text = (
+            f"🎉 <b>Твоя команда — {squad.name}!</b>\n\n"
+            f"Переходи в свою команду:\n"
+            f"{squad.link}"
+        )
+
+    else:
+
+        text = (
+            f"🎉 <b>Твоя команда — {squad.name}!</b>\n\n"
+            "Ссылка на команду пока не настроена."
+        )
+
+    await message.answer(
+        text,
+        reply_markup=main_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+# ============================================================
+# /START
+# ============================================================
+
+@dp.message(Command("start"))
+async def start_handler(message: Message):
+
+    await message.answer(
+        "Привет! 👋\n\n"
+        "Нажми кнопку ниже, чтобы получить "
+        "свою случайную команду.",
+        reply_markup=main_keyboard(),
+    )
+
+
+# ============================================================
+# BUTTON
 # ============================================================
 
 @dp.callback_query(F.data == "get_squad")
-async def get_squad_callback(callback):
+async def get_squad_callback(
+    callback: CallbackQuery
+):
+
+    user = callback.from_user
+
+    squad, newly_assigned = await assign_squad(
+        telegram_id=user.id,
+        first_name=user.first_name or "",
+        last_name=user.last_name or "",
+        username=user.username or "",
+    )
+
+    if squad is None:
+
+        await callback.message.answer(
+            "❌ Все команды уже заполнены.",
+        )
+
+        await callback.answer()
+        return
+
+
+    await send_team(
+        callback.message,
+        squad,
+    )
+
     await callback.answer()
 
-    await assign_squad(callback.message)
+
+    # --------------------------------------------------------
+    # Synchronize Google Sheets after a NEW assignment.
+    # --------------------------------------------------------
+
+    if newly_assigned:
+
+        try:
+
+            await sync_google_sheets()
+
+        except Exception as error:
+
+            # Assignment is already safely stored in PostgreSQL.
+            # Google Sheets failure must NOT break the bot.
+
+            print(
+                "Google Sheets synchronization error:",
+                repr(error),
+            )
 
 
 # ============================================================
-# КОМАНДА /TEAM
+# /TEAM
 # ============================================================
 
 @dp.message(Command("team"))
 async def team_handler(message: Message):
-    await assign_squad(message)
+
+    user = message.from_user
+
+    async with SessionLocal() as session:
+
+        result = await session.execute(
+            select(Participant)
+            .where(
+                Participant.telegram_id == user.id
+            )
+        )
+
+        participant = result.scalar_one_or_none()
+
+        if not participant:
+
+            await message.answer(
+                "У тебя пока нет команды.\n\n"
+                "Нажми кнопку ниже.",
+                reply_markup=main_keyboard(),
+            )
+
+            return
+
+
+        squad_result = await session.execute(
+            select(Squad)
+            .where(
+                Squad.id == participant.squad_id
+            )
+        )
+
+        squad = squad_result.scalar_one()
+
+
+    await send_team(
+        message,
+        squad,
+    )
 
 
 # ============================================================
@@ -404,24 +688,27 @@ async def team_handler(message: Message):
 # ============================================================
 
 def is_admin(message: Message):
-    if not ADMIN_TELEGRAM_ID:
-        return False
 
-    return str(message.from_user.id) == str(ADMIN_TELEGRAM_ID)
+    return str(message.from_user.id) == str(
+        ADMIN_TELEGRAM_ID
+    )
 
 
 # ============================================================
-# ADMIN STATS
+# /ADMIN
 # ============================================================
 
 @dp.message(Command("admin"))
 async def admin_handler(message: Message):
 
     if not is_admin(message):
+
         await message.answer(
-            "⛔ У тебя нет доступа к этой команде."
+            "⛔ Доступ запрещён."
         )
+
         return
+
 
     async with SessionLocal() as session:
 
@@ -431,48 +718,101 @@ async def admin_handler(message: Message):
 
         squads = result.scalars().all()
 
-        total = sum(
-            squad.members_count
-            for squad in squads
+
+    lines = [
+        "📊 <b>Статистика команд</b>",
+        "",
+    ]
+
+    total = 0
+
+    for squad in squads:
+
+        count = squad.members_count or 0
+        free = SQUAD_LIMIT - count
+
+        total += count
+
+        lines.append(
+            f"<b>{squad.name}</b>: "
+            f"{count}/{SQUAD_LIMIT} "
+            f"(свободно: {free})"
         )
 
-        text = "📊 <b>Статистика команд</b>\n\n"
 
-        for squad in squads:
-            text += (
-                f"🏆 {squad.name}: "
-                f"<b>{squad.members_count}/20</b>\n"
-            )
+    lines.append("")
+    lines.append(
+        f"👥 Всего участников: {total}/200"
+    )
 
-        text += f"\n👥 Всего участников: <b>{total}/200</b>"
+    await message.answer(
+        "\n".join(lines),
+        parse_mode="HTML",
+    )
+
+
+# ============================================================
+# /SYNC
+# ============================================================
+
+@dp.message(Command("sync"))
+async def sync_handler(message: Message):
+
+    if not is_admin(message):
 
         await message.answer(
-            text,
-            parse_mode="HTML",
+            "⛔ Доступ запрещён."
+        )
+
+        return
+
+
+    try:
+
+        await sync_google_sheets()
+
+        await message.answer(
+            "✅ Google Таблица синхронизирована."
+        )
+
+    except Exception as error:
+
+        print(
+            "Google Sheets synchronization error:",
+            repr(error),
+        )
+
+        await message.answer(
+            "❌ Не удалось синхронизировать Google Таблицу.\n"
+            "Проверь настройки Google API."
         )
 
 
 # ============================================================
-# ADMIN RESET
+# /RESET
 # ============================================================
 
 @dp.message(Command("reset"))
 async def reset_handler(message: Message):
 
     if not is_admin(message):
+
         await message.answer(
-            "⛔ У тебя нет доступа к этой команде."
+            "⛔ Доступ запрещён."
         )
+
         return
+
 
     async with SessionLocal() as session:
 
-        # Удаляем всех участников
+        # Delete all participants.
         await session.execute(
             delete(Participant)
         )
 
-        # Обнуляем количество людей
+
+        # Reset squad counters.
         result = await session.execute(
             select(Squad)
         )
@@ -480,52 +820,63 @@ async def reset_handler(message: Message):
         squads = result.scalars().all()
 
         for squad in squads:
+
             squad.members_count = 0
+
 
         await session.commit()
 
+
+    # Also clear/rebuild Google Sheets.
+    try:
+
+        await sync_google_sheets()
+
+    except Exception as error:
+
+        print(
+            "Google Sheets synchronization error:",
+            repr(error),
+        )
+
+
     await message.answer(
-        "♻️ Все команды очищены.\n\n"
-        "Теперь можно проводить новое распределение."
+        "♻️ Распределение полностью сброшено.\n\n"
+        "Все 10 команд снова пустые."
     )
 
 
 # ============================================================
-# HELP
+# /HELP
 # ============================================================
 
 @dp.message(Command("help"))
 async def help_handler(message: Message):
 
-    text = (
-        "ℹ️ <b>Помощь</b>\n\n"
-        "/start — получить кнопку распределения\n"
-        "/team — получить команду\n"
-    )
-
-    if is_admin(message):
-        text += (
-            "\n<b>Команды администратора:</b>\n"
-            "/admin — статистика\n"
-            "/reset — полностью очистить распределение\n"
-        )
-
     await message.answer(
-        text,
+        "ℹ️ <b>Команды</b>\n\n"
+        "/start — начать\n"
+        "/team — показать свою команду\n"
+        "/help — помощь\n\n"
+        "Администратор:\n"
+        "/admin — статистика\n"
+        "/sync — синхронизация Google Таблицы\n"
+        "/reset — сбросить всё распределение",
         parse_mode="HTML",
     )
 
 
 # ============================================================
-# ЛЮБОЕ ДРУГОЕ СООБЩЕНИЕ
+# FALLBACK
 # ============================================================
 
 @dp.message()
 async def fallback_handler(message: Message):
 
     await message.answer(
-        "Нажми кнопку ниже, чтобы получить свою команду.",
-        reply_markup=get_squad_keyboard(),
+        "Нажми кнопку ниже, чтобы получить "
+        "свою команду 👇",
+        reply_markup=main_keyboard(),
     )
 
 
@@ -540,7 +891,22 @@ async def main():
     await init_database()
 
     print("Database initialized.")
-    print("Bot is running.")
+
+    # Initial synchronization.
+    try:
+
+        await sync_google_sheets()
+
+        print("Google Sheets synchronized.")
+
+    except Exception as error:
+
+        print(
+            "Initial Google Sheets synchronization failed:",
+            repr(error),
+        )
+
+    print("Bot started.")
 
     await dp.start_polling(bot)
 
